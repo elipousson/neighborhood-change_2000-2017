@@ -1,0 +1,620 @@
+---
+title: "Neighborhood Change in Baltimore: 2000 to 2017"
+author: "Eli Pousson"
+date: "6/25/2020"
+output: html_document
+---
+
+I created this analysis to replicate the analysis from the April 2020 report ["Drilling Down in Baltimore’s Neighborhoods:Changes in racial/ethnic composition and income from 2000 to 2017"](https://abell.org/sites/default/files/files/Abell_Neighborhood%20Changes%20Report%20FULL%201_13Final%20(dr).pdf) (April 2020) prepared for the Abell Foundation by Alan Mallach.
+
+Between when I initially developed this analysis in late June and when I shared this analysis on GitHub in mid November, the 2000 decennial Census SF3 endpoint was removed by the Census Bureau making it currently impossible to use the tidycensus package to download the 2000 data. The author of the tidycensus package recommends using [NHGIS](https://nhgis.org) and the ipumsr R package instead but this code has not yet been updated to take this approach.
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(tidyverse)
+library(tidycensus)
+library(sf)
+library(scales)
+library(blscrapeR)
+#library(janitor)
+
+# Load variables
+# v00_sf3 <- load_variables(2000, "sf3", cache = TRUE)
+# View(v00_sf3)
+# v10_acs5 <- load_variables(2010, "acs5", cache = TRUE)
+# View(v10_acs5)
+# v17_acs5 <- load_variables(2017, "acs5", cache = TRUE)
+# View(v17_acs5)
+
+# Set theme defaults for plots
+plot_theme <- hrbrthemes::theme_ipsum_rc(base_size = 16)
+
+# Set options to avoid scientific notation
+options(scipen = 999)
+
+# Set theme defaults for maps
+map_theme <- theme_void() + hrbrthemes::theme_ipsum_rc(base_size = 18) + theme(
+  panel.grid.major = element_line(color = "transparent"),
+  axis.title = element_text(color = "transparent"),
+  axis.text = element_text(color = "transparent")
+)
+
+# Save BLS API Key ("XXX") to local environment
+# Sys.setenv("BLS_KEY" = "XXX")
+# set_bls_key("XXX")
+
+# Get inflation adjustment values
+adj_values <- blscrapeR::inflation_adjust(2017) %>% 
+  filter(year %in% c(1999, 2010, 2017)) # Using year 1999 instead of year 2000 to match dollar values used in the 2000 decennial Census
+
+# Download tract data
+baltimore_tracts <- tigris::tracts(state = "MD", county = "Baltimore city", class = "sf") %>%
+  janitor::clean_names("snake") %>%
+  select(geoid)
+
+```
+
+```{r analysis_variables}
+dec_years <- lst(2000) # Select years for decennial census data
+acs_years <- lst(2010, 2017) # Select years for ACS data
+# TODO: Abell Home Ownership study appears to use 2011 ACS data
+
+# Define MSA county list
+baltimore_msa <- c(
+  "Anne Arundel County",
+  "Baltimore city",
+  "Baltimore County",
+  "Carroll County",
+  "Harford County",
+  "Howard County",
+  "Queen Anne's County")
+```
+
+```{r census_variables}
+# Select 5 year ACS variables for 2010 and 2017
+acs_vars <- c(
+  total_pop = "B01003_001",
+  white_pop = "B02001_002",
+  black_pop = "B02001_003",
+  hispanic_pop = "B03002_012",
+  white_nonhispanic_pop = "B03002_003",
+  black_nonhispanic_pop = "B03002_004",
+  median_household_income = "B19013_001",
+  median_household_income_white = "B19013A_001",
+  median_household_income_black = "B19013B_001",
+  median_gross_rent = "B25064_001",
+  median_value_owner_unit ="B25077_001",
+  total_units = "B25002_001",
+  vacant_units = "B25002_003",
+  occupied_units = "B25002_002",
+  owner_occupied_units = "B25003_002",
+  renter_occupied_units = "B25003_003",
+  owner_pop = "B25008_002", # Total population	in owner occupied housing units
+  renter_pop = "B25008_003", # Total population	in renter occupied housing units
+  poverty_pop = "B17021_002" # Income in the past 12 months below poverty level (from table by LIVING ARRANGEMENT)
+)
+
+# Select decennial Census variables (sf3) for 2000
+decennial_vars_2000 <- c(
+  total_pop = "P006001", #	Total population	P6. Race [8]
+  white_pop = "P006002",
+  black_pop = "P006003", #	Total:  Black or African American alone	P6. Race [8]
+  hispanic_pop = "P007010",
+  white_nonhispanic_pop = "P007003",
+  black_nonhispanic_pop = "P007004",
+  median_household_income = "P053001", # Median household income (1999 $)
+  median_household_income_white = "P152A001",
+  median_household_income_black = "P152B001",
+  median_gross_rent = "H063001",
+  median_value_owner_unit = "H085001", # TODO: Check on alternate H076001	Median value Specified owner-occupied housing units
+  total_units = "H002001",
+  vacant_units = "H006003",
+  occupied_units = "H007001", # units
+  owner_occupied_units = "H007002", # units
+  renter_occupied_units = "H007003", # units
+  owner_pop = "H015002",
+  renter_pop = "H015003",
+  poverty_pop = "P087002"
+)
+```
+
+```{r baltimore_msa_census_download}
+
+# Download data for MSA
+baltimore_msa_2010_2017 <- map_dfr(
+  acs_years,
+  ~ get_acs(
+    geography = "county",
+    cache_table = TRUE,
+    variables = acs_vars,
+    state = "MD",
+    county = baltimore_msa,
+    year = .x,
+    survey = "acs5",
+    geometry = FALSE
+  ),
+  .id = "year"  # when combining results, add id var (name of list item)
+  ) %>%
+  select(-moe) %>%  # Remove unused margin of error
+  arrange(variable, NAME) %>% 
+  rename(value = estimate)
+
+# NOTE: Error: The 2000 decennial Census SF3 endpoint has been removed by the Census Bureau. We will support this data again when the endpoint is updated; in the meantime, we recommend using NHGIS (https://nhgis.org) and the ipumsr R package.
+
+baltimore_msa_2000 <- map_dfr(
+  dec_years,
+  ~ get_decennial(
+    geography = "county",
+    cache_table = TRUE,
+    variables = decennial_vars_2000,
+    state = "MD",
+    county = baltimore_msa,
+    year = .x,
+    survey = "sf3",
+    geometry = FALSE
+  ),
+  .id = "year"  # when combining results, add id var (name of list item)
+  ) %>%
+  arrange(variable, NAME) %>% 
+  mutate(NAME = paste0(NAME,", Maryland")) # Modify NAME column to match ACS data
+
+# Combine 2000 decennial data with 2010 and 2017 ACS data
+baltimore_msa_2000_2017 <- bind_rows(baltimore_msa_2000, baltimore_msa_2010_2017)
+
+baltimore_msa_names <- baltimore_msa_2000_2017 %>% 
+  distinct(GEOID, .keep_all = TRUE) %>%
+  janitor::clean_names('snake') %>% 
+  select(geoid, name)
+```
+
+```{r baltimore_city_census_download}
+# The citywide tract level data drops the name as an ID field
+baltimore_city_2010_2017 <- map_dfr(
+  acs_years,
+  ~ get_acs(
+    geography = "tract",
+    cache_table = TRUE,
+    variables = acs_vars,
+    state = "MD",
+    county = "Baltimore city",
+    year = .x,
+    survey = "acs5",
+    geometry = FALSE
+  ),
+  .id = "year"  # when combining results, add id var (name of list item)
+  ) %>%
+  select(-moe, -NAME) %>%  # Remove unused margin of error and name
+  arrange(variable) %>% 
+  rename(value = estimate)
+
+baltimore_city_2000 <- map_dfr(
+  dec_years,
+  ~ get_decennial(
+    geography = "tract",
+    cache_table = TRUE,
+    variables = decennial_vars_2000,
+    state = "MD",
+    county = "Baltimore city",
+    year = .x,
+    survey = "sf3",
+    geometry = FALSE
+  ),
+  .id = "year"  # when combining results, add id var (name of list item)
+  ) %>%
+  select(-NAME) %>% 
+  arrange(variable)
+
+# Combine 2000 Census data with 2010 and 2017 ACS data
+baltimore_city_2000_2017 <- bind_rows(baltimore_city_2000, baltimore_city_2010_2017)
+
+```
+
+```{r baltimore_msa_pop_download}
+acs_pop_years <- lst(2010, 2011, 2012, 2013, 2014, 2015, 2016, 2017)
+
+acs_pop_vars <- c(
+  total_pop = "B01003_001",
+  white_pop = "B02001_002",
+  black_pop = "B02001_003",
+  hispanic_pop = "B03002_012",
+  white_nonhispanic_pop = "B03002_003",
+  black_nonhispanic_pop = "B03002_004")
+
+baltimore_msa_pop_2010_2017 <- map_dfr(
+  acs_pop_years,
+  ~ get_acs(
+    geography = "county",
+    variables = acs_pop_vars,
+    state = "MD",
+    county = baltimore_msa,
+    year = .x,
+    survey = "acs1",
+    geometry = FALSE
+  ),
+  .id = "year"  # when combining results, add id var (name of list item)
+  ) %>%
+  select(-moe) %>%  # Remove unused margin of error
+  arrange(variable, NAME) %>% 
+  rename(value = estimate)
+```
+
+```{r plot_msa_pop}
+# Switch MSA population data table from long to wide format
+baltimore_msa_pop_2010_2017_wide <- baltimore_msa_pop_2010_2017 %>%
+      pivot_wider(id_cols = c("year", "GEOID"),
+                names_from = "variable",
+                values_from = "value") %>%
+  janitor::clean_names(case = "snake")
+
+baltimore_black_pop_2010 <- filter(baltimore_msa_pop_2010_2017_wide, geoid == "24510", year == "2010")$black_pop
+
+baltimore_white_pop_2010 <- filter(baltimore_msa_pop_2010_2017_wide, geoid == "24510", year == "2010")$white_pop
+
+baltimore_total_pop_2010 <- filter(baltimore_msa_pop_2010_2017_wide, geoid == "24510", year == "2010")$total_pop
+
+baltimore_pop_2010_2017_wide <- baltimore_msa_pop_2010_2017_wide %>%
+  filter(geoid == "24510") %>%
+  mutate(
+    black_pop_change_relative_2010 = black_pop - baltimore_black_pop_2010,
+    cumulative_black_pop_change_relative_2010 = cumsum(black_pop_change_relative_2010),
+    white_pop_change_relative_2010 = white_pop - baltimore_white_pop_2010,
+    cumulative_white_pop_change_relative_2010 = cumsum(white_pop_change_relative_2010),
+    total_pop_change_relative_2010 = total_pop - baltimore_total_pop_2010,
+    cumulative_total_pop_change_relative_2010 = cumsum(total_pop_change_relative_2010)
+  )
+
+baltimore_msa_pop_2010_2017_wide %>% 
+  filter(geoid == "24510") %>% 
+  ggplot(aes(x = year)) +
+  geom_line(aes(y = black_pop - baltimore_black_pop_2010, group = 1), color = "blue") +
+  geom_line(aes(y = white_pop - baltimore_white_pop_2010, group = 2), color = "red") +
+  geom_line(aes(y = total_pop - baltimore_total_pop_2010, group = 3), color = "black") +
+  labs(
+    title = "Change in Black, White, and total population of Baltimore City since 2010"
+  ) +
+  map_theme
+
+# each year take the difference between the current year and 2010 + the difference from the year prior
+
+baltimore_msa_pop_2010_2017 %>%
+  filter(variable == "total_pop") %>%
+  mutate(value = value / 1000) %>% 
+  ggplot(aes(x = year, y = value, group = NAME, color = NAME), size = 2) +
+  geom_point() +
+  geom_line() +
+  scale_color_viridis_d() + 
+  labs(
+    title = "Population by county in Baltimore metro area",
+    x = "Year",
+    y = "Total population (thousands)",
+    caption = "Source: ACS 1 Year"
+  ) +
+  scale_y_log10() +
+  plot_theme
+
+ggsave(
+  filename = "baltimore_msa_pop_2010_2017.png",
+  plot = last_plot(),
+  scale = 1,
+  width = 11.25,
+  height = 11.25,
+  units = c("in"),
+  dpi = 96,
+  limitsize = TRUE,
+)
+```
+
+```{r helper_functions}
+clean_census_data <- function(x) {
+  x %>% 
+    pivot_wider(id_cols = c("year", "GEOID"),
+                names_from = "variable",
+                values_from = "value") %>%
+  janitor::clean_names(case = "snake") %>%
+  mutate( # Calculate percentages
+    pct_white = white_pop / total_pop,
+    pct_white_nonhispanic = white_nonhispanic_pop / total_pop,
+    pct_black_nonhispanic = black_nonhispanic_pop / total_pop,
+    pct_hisp = hispanic_pop / total_pop,
+    pct_black = black_pop / total_pop,
+    pct_owner_units = owner_occupied_units / occupied_units,
+    pct_owner_pop = owner_pop / total_pop,
+    pct_vacancy = vacant_units / total_units,
+    pct_poverty = poverty_pop / total_pop
+  ) %>%
+  mutate_at(vars(starts_with("pct")), ~ . * 100) %>% # Convert percentages into whole numbers
+  mutate(
+    median_household_income_adj = case_when(
+      year == 2000 ~ median_household_income + median_household_income * (1 - filter(adj_values, year == 2000)$adj_value),
+      year == 2010 ~ median_household_income + median_household_income * (1 - filter(adj_values, year == 2010)$adj_value),
+      year == 2017 ~ median_household_income
+    ),
+    median_household_income_white_adj = case_when(
+      year == 2000 ~ median_household_income_white + median_household_income_white * (1 - filter(adj_values, year == 2000)$adj_value),
+      year == 2010 ~ median_household_income_white + median_household_income_white * (1 - filter(adj_values, year == 2010)$adj_value),
+      year == 2017 ~ median_household_income_white
+    ),
+    median_household_income_black_adj = case_when(
+      year == 2000 ~ median_household_income_black + median_household_income_black * (1 - filter(adj_values, year == 2000)$adj_value),
+      year == 2010 ~ median_household_income_black + median_household_income_black * (1 - filter(adj_values, year == 2010)$adj_value),
+      year == 2017 ~ median_household_income_black
+    ),
+    median_gross_rent_adj = case_when(
+      year == 2000 ~ median_gross_rent + median_gross_rent * (1 - filter(adj_values, year == 2000)$adj_value),
+      year == 2010 ~ median_gross_rent + median_gross_rent * (1 - filter(adj_values, year == 2010)$adj_value),
+      year == 2017 ~ median_gross_rent
+    ),
+    median_value_owner_unit_adj = case_when(
+      year == 2000 ~ median_value_owner_unit + median_value_owner_unit * (1 - filter(adj_values, year == 2000)$adj_value),
+      year == 2010 ~ median_value_owner_unit + median_value_owner_unit * (1 - filter(adj_values, year == 2010)$adj_value),
+      year == 2017 ~ median_value_owner_unit
+    )
+  )
+}
+
+# TODO: Figure out how to generalize these functions
+first_last_change <- function(x) { last(x) - first(x) }
+first_last_pct_change <- function(x) { ((last(x) / first(x)) - 1) * 100 }
+first_second_change <- function(x) { nth(x, 2) - first(x) }
+first_second_pct_change <- function(x){ ((nth(x, 2) / first(x)) - 1) * 100 }
+second_last_change <- function(x) { nth(x, 3) - nth(x, 2) }
+second_last_pct_change <- function(x){ ((nth(x, 3) / nth(x, 2)) - 1) * 100 }
+
+```
+
+```{r baltimore_msa_clean}
+baltimore_msa_2000_2017_wide <- baltimore_msa_2000_2017 %>% 
+  clean_census_data()
+```
+
+Mallach looked at cumulative population change by race from 2011 to 2017 relative to 2010. The racial composition of the population within each tract was categorized to one of the three categories:
+
+- Predominantly White (0-29.9% Black)
+- Mixed (30-69.9% Black)
+- Predominantly Black (70-100% Black)
+
+Tracts were also assigned to one of five income groups based on citywide median income:
+
+- Low
+- Moderate
+- Middle
+- Upper-Middle
+- Upper
+
+Relative to the citywide median income for the corresponding year these groups are:
+
+- 0 - 59.9% of citywide median income
+- 60 - 99.9%
+- 100 - 149.9%
+- 150 - 199.9%
+- 200%+
+
+Other variables used in the original analysis include:
+
+- Total Population
+- Black Population
+- Latinx Population 
+- White Non-Latinx  Population 
+- Median Household Income
+- Black Median Household Income
+- White Median Household Income
+- % in Poverty
+- Homeowners (#)
+- Renters (#)
+- CoreLogic (sales price and volume)
+  - Median Sales Price
+  - Sales Volume
+- Median Monthly Gross (derived from CoreLogic data?)
+- Average Annual Change (derived from CoreLogic data?)
+
+```{r baltimore_city_clean}
+# Switch from long to wide
+baltimore_city_2000_2017_wide <- baltimore_city_2000_2017 %>%
+  clean_census_data()
+
+# Add categories (identical to categories in the report)
+baltimore_city_2000_2017_wide <- baltimore_city_2000_2017_wide %>%
+  mutate(
+    race_category = case_when(
+      pct_black < 30 ~ "Predominantly White",
+      (pct_black >= 30) & (pct_black < 70) ~ "Mixed",
+      pct_black >= 70 ~ "Predominantly Black"
+    ),
+    pct_relative_citywide_median_income = case_when(
+      year == 2017 ~ (median_household_income / median(filter(baltimore_city_2000_2017_wide, year == 2017)$median_household_income, na.rm = TRUE)) * 100, # Citywide median household income from 2017 listed in report is 46641 / calculated is 41261
+      year == 2010 ~ (median_household_income / median(filter(baltimore_city_2000_2017_wide, year == 2010)$median_household_income, na.rm = TRUE)) * 100,
+      year == 2000 ~ (median_household_income / median(filter(baltimore_city_2000_2017_wide, year == 2000)$median_household_income, na.rm = TRUE)) * 100
+          ),
+    income_category =  case_when(
+      pct_relative_citywide_median_income < 60 ~ "Low Income",
+      (pct_relative_citywide_median_income >= 60) & (pct_relative_citywide_median_income < 100) ~ "Moderate Income",
+      (pct_relative_citywide_median_income >= 100) & (pct_relative_citywide_median_income < 150) ~ "Middle Income",
+      (pct_relative_citywide_median_income >= 150) & (pct_relative_citywide_median_income < 200) ~ "Upper-Middle Income",
+      pct_relative_citywide_median_income >= 200 ~ "Upper Income"
+    )
+  ) %>% 
+  mutate(
+    owner_occupied_units_category =  case_when(
+      pct_owner_units < 49.24641 ~ "Below Average Owner-Occupied Units (2010)",
+      pct_owner_units >= 49.24641 ~ "Above Average Owner-Occupied Units (2010)"
+    ),
+    owner_occupancy_category =  case_when(
+      pct_owner_pop < 48.65551 ~ "Below Average Owner-Occupancy (2010)",
+      pct_owner_pop >= 48.65551 ~ "Above Average Owner-Occupancy (2010)"
+    )
+  )
+
+```
+
+
+```{r baltimore_city_category_plot}
+# Create a dataframe w/ just the years, geoids, and categories
+baltimore_city_category <- baltimore_city_2000_2017_wide %>% 
+  select(year, geoid, race_category, income_category)
+
+baltimore_city_category$income_category <- forcats::fct_relevel(baltimore_city_category$income_category, "Low Income", "Moderate Income", "Middle Income", "Upper-Middle Income", "Upper Income")
+
+baltimore_city_category %>%
+  filter(year == 2017, !is.na(income_category), !is.na(race_category)) %>% 
+  ggplot() +
+  geom_bar(stat = "count", aes(x = race_category, y = ..count.., fill = race_category)) +
+  coord_flip() +
+  scale_fill_viridis_d(begin = 0.25, end = 0.75, option = "B") + 
+  guides(fill = FALSE) +
+  facet_wrap(~ income_category) +
+  plot_theme +
+  labs(
+    title = "Census tracts by race and income categories",
+    source = "Source: ACS 5-year, 2013-2017",
+    x = "Category",
+    y = "Number of tracts"
+  )
+
+baltimore_city_category %>%
+  filter(year == 2017, !is.na(income_category), !is.na(race_category)) %>% 
+  ggplot() +
+  geom_bar(stat = "count", aes(x = income_category, y = ..count.., fill = income_category)) +
+  coord_flip() +
+  scale_fill_viridis_d(begin = 0.25, end = 0.75, option = "B") + 
+  guides(fill = FALSE) +
+  facet_wrap(~ race_category) +
+  plot_theme +
+  labs(
+    title = "Baltimore City Census tracts by income and race categories (2017)",
+    source = "Source: ACS 5-year, 2013-2017",
+    x = "Category",
+    y = "Number of tracts"
+  )
+
+
+```
+
+
+```{r change_pct_change}
+baltimore_city_2000_2017_wider <- baltimore_city_2000_2017_wide %>% 
+  group_by(geoid) %>%
+  summarise(across(
+      black_pop:median_value_owner_unit_adj,
+      list(change_2000_2010 = first_second_change,
+           pct_change_2000_2010 = first_second_pct_change,
+           change_2000_2017 = first_last_change,
+           pct_change_2000_2017 = first_last_pct_change,
+           change_2010_2017 = second_last_change,
+           pct_change_2010_2017 = second_last_pct_change),
+      .names = "{col}_{fn}"))
+
+
+baltimore_city_2000_2017_wider <- baltimore_city_2000_2017_wider %>%
+  mutate(
+    black_pop_change_2000_2017_category = case_when(
+      black_pop_change_2000_2017 <= -1500 ~ "Loss of 1,500 or more",
+      (black_pop_change_2000_2017 > -1500) & (black_pop_change_2000_2017 <= -1000) ~ "Loss of 1,000 to 1,499",
+      (black_pop_change_2000_2017 > -1000) & (black_pop_change_2000_2017 <= -500) ~ "Loss of 500 to 999",
+      (black_pop_change_2000_2017 > -500) & (black_pop_change_2000_2017 < 500) ~ "Change of less than 500",
+      (black_pop_change_2000_2017 >= 500) & (black_pop_change_2000_2017 < 1000) ~ "Gain of 500 to 999",
+      (black_pop_change_2000_2017 >= 1000) & (black_pop_change_2000_2017 < 1500) ~ "Gain of 1,000 to 1,499",
+      black_pop_change_2000_2017 >= 1500 ~ "Gain of 1,500 or more"
+    ),
+    white_pop_change_2000_2017_category = case_when(
+      white_pop_change_2000_2017 <= -1500 ~ "Loss of 1,500 or more",
+      (white_pop_change_2000_2017 > -1500) & (white_pop_change_2000_2017 <= -1000) ~ "Loss of 1,000 to 1,499",
+      (white_pop_change_2000_2017 > -1000) & (white_pop_change_2000_2017 <= -500) ~ "Loss of 500 to 999",
+      (white_pop_change_2000_2017 > -500) & (white_pop_change_2000_2017 < 500) ~ "Change of less than 500",
+      (white_pop_change_2000_2017 >= 500) & (white_pop_change_2000_2017 < 1000) ~ "Gain of 500 to 999",
+      (white_pop_change_2000_2017 >= 1000) & (white_pop_change_2000_2017 < 1500) ~ "Gain of 1,000 to 1,499",
+      white_pop_change_2000_2017 >= 1500 ~ "Gain of 1,500 or more"
+      )
+  )
+
+baltimore_city_2000_2017_wider$black_pop_change_2000_2017_category <- forcats::fct_relevel(baltimore_city_2000_2017_wider$black_pop_change_2000_2017_category,
+"Loss of 1,500 or more",
+"Loss of 1,000 to 1,499",
+"Loss of 500 to 999",
+"Change of less than 500",
+"Gain of 500 to 999",
+"Gain of 1,000 to 1,499",
+"Gain of 1,500 or more")
+
+
+baltimore_city_2000_2017_wider$white_pop_change_2000_2017_category <- forcats::fct_relevel(baltimore_city_2000_2017_wider$white_pop_change_2000_2017_category,
+"Loss of 1,500 or more",
+"Loss of 1,000 to 1,499",
+"Loss of 500 to 999",
+"Change of less than 500",
+"Gain of 500 to 999",
+"Gain of 1,000 to 1,499",
+"Gain of 1,500 or more")
+
+baltimore_tracts %>% 
+  left_join(baltimore_city_2000_2017_wider, by = "geoid") %>%
+  filter(black_pop_change_2000_2017_category != "Change of less than 500") %>% 
+  ggplot() +
+  geom_sf(data = baltimore_tracts, color = "gray", fill = NA) +
+  geom_sf(aes(fill = black_pop_change_2000_2017_category, color = black_pop_change_2000_2017_category)) +
+  scale_fill_viridis_d(option = "D", begin = 0.05, end = 0.95) +
+  scale_color_viridis_d(option = "D", begin = 0.05, end = 0.95) +
+  guides(color = FALSE) +
+  labs(
+    title = "Black population change between 2000 and 2017 by Census tract",
+    fill = "Population change",
+    caption = "Sources: Decennial Census (2000), American Comunity Survey (5 year, 2013-2017)"
+  ) +
+  map_theme
+
+baltimore_tracts %>% 
+  left_join(baltimore_city_2000_2017_wider, by = "geoid") %>%
+  filter(white_pop_change_2000_2017_category != "Change of less than 500") %>% 
+  ggplot() +
+  geom_sf(data = baltimore_tracts, color = "gray", fill = NA) +
+  geom_sf(aes(fill = white_pop_change_2000_2017_category, color = white_pop_change_2000_2017_category)) +
+  scale_fill_viridis_d(option = "D", begin = 0.05, end = 0.95) +
+  scale_color_viridis_d(option = "D", begin = 0.05, end = 0.95) +
+  guides(color = FALSE) +
+  labs(
+    title = "White population change between 2000 and 2017 by Census tract",
+    fill = "Population change",
+    caption = "Sources: Decennial Census (2000), American Comunity Survey (5 year, 2013-2017)"
+  ) +
+  map_theme
+
+```
+
+```{r baltimore_city_maps_plots}
+# Switch from wide to long format
+baltimore_city_2000_2017_longer <- baltimore_city_2000_2017_wider %>% 
+  pivot_longer(cols = black_pop_change_2000_2010:median_value_owner_unit_adj_pct_change_2000_2017,
+    names_to = "variable",
+    values_to = "value")
+
+# Map showing pct change in population from 2000 to 2017
+baltimore_tracts %>% 
+  left_join(baltimore_city_2000_2017_longer, by = "geoid") %>%
+  filter(str_detect(variable, "black_pop_change") | str_detect(variable, "white_pop_change")) %>%
+  ggplot() +
+  geom_sf(aes(color = value, fill = value)) +
+  scale_color_viridis_c(option = "B", aesthetics = c("color", "fill")) +
+  facet_wrap(~ variable)
+
+# Map white population change
+baltimore_tracts %>% 
+  left_join(baltimore_city_2000_2017_wider, by = "geoid") %>%
+  ggplot() +
+  geom_sf(aes(color = white_pop_change_2000_2017, fill = white_pop_change_2000_2017)) +
+  scale_color_viridis_c(option = "B", aesthetics = c("color", "fill"))
+
+# Map total population change
+baltimore_tracts %>% 
+  left_join(baltimore_city_2000_2017_wider, by = "geoid") %>%
+  ggplot() +
+  geom_sf(aes(color = total_pop_change_2000_2017, fill = total_pop_change_2000_2017)) +
+  scale_color_viridis_c(option = "B", aesthetics = c("color", "fill"))
+
+
+baltimore_city_2000_2017_wider %>% 
+  select(name, pct_total_pop_change_2000_2010:pct_black_pop_change_2000_2017) %>% 
+  ggplot(aes(x = name, y = pct_total_pop_change_2000_2010, fill = name)) +
+  geom_col() +
+  scale_y_continuous(limits = c(90, 150)) +
+  coord_flip()
+```
